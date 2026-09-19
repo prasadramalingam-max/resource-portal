@@ -1,6 +1,7 @@
+// Pre-configured with your repository details
 const CONFIG = {
-  owner: 'prasadramalingam-max', // Replace with your GitHub username
-  repo: 'resource-portal',        // Replace with your repository name
+  owner: 'prasadramalingam-max',
+  repo: 'resource-portal',
   branch: 'main'
 };
 
@@ -8,22 +9,26 @@ const CONFIG = {
 function determineFolder(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   if (['zip', 'tar', 'gz', 'rar', '7z'].includes(ext)) return 'uploads/archives';
-  if (['pdf', 'odt', 'docx', 'txt', 'csv'].includes(ext)) return 'uploads/docs';
-  if (['jpg', 'jpeg', 'png', 'svg', 'webp'].includes(ext)) return 'uploads/images';
+  if (['pdf', 'odt', 'docx', 'doc', 'txt', 'csv'].includes(ext)) return 'uploads/docs';
+  if (['jpg', 'jpeg', 'png', 'svg', 'webp', 'gif'].includes(ext)) return 'uploads/images';
   return 'uploads/others';
 }
 
-// Convert File object to Base64
+// Convert binary file to Base64
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onload = () => {
+      // Strips "data:*/*;base64," prefix
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
     reader.onerror = error => reject(error);
   });
 }
 
-// Step 5A: Commit uploaded file to GitHub repository
+// 1. Upload raw file to GitHub via Contents API
 async function uploadFileToGitHub(file, token) {
   const folder = determineFolder(file.name);
   const cleanName = `${Date.now()}_${file.name.replace(/\s+/g, '_')}`;
@@ -46,20 +51,20 @@ async function uploadFileToGitHub(file, token) {
   });
 
   if (!res.ok) {
-    const errorData = await res.json();
-    throw new Error(errorData.message || 'File upload failed');
+    const err = await res.json();
+    throw new Error(err.message || 'File upload failed');
   }
 
   const responseJson = await res.json();
   return responseJson.content.path;
 }
 
-// Step 5B: Update data/records.json
+// 2. Read records.json, append new entry, and commit
 async function updateRecordsDatabase(newEntry, token) {
   const dbPath = 'data/records.json';
   const endpoint = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents/${dbPath}?ref=${CONFIG.branch}`;
 
-  // 1. Get current content and SHA
+  // Get current content and SHA
   const getRes = await fetch(endpoint, {
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -73,14 +78,15 @@ async function updateRecordsDatabase(newEntry, token) {
   if (getRes.ok) {
     const data = await getRes.json();
     fileSha = data.sha;
+    // Decode UTF-8 Base64 properly
     const decodedText = decodeURIComponent(escape(atob(data.content)));
     records = JSON.parse(decodedText);
   }
 
-  // 2. Prepend new record
+  // Prepend latest item to top
   records.unshift(newEntry);
 
-  // 3. Re-encode and commit back
+  // Encode back to UTF-8 Base64
   const updatedBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(records, null, 2))));
   const putRes = await fetch(endpoint, {
     method: 'PUT',
@@ -98,12 +104,12 @@ async function updateRecordsDatabase(newEntry, token) {
   });
 
   if (!putRes.ok) {
-    const errorData = await putRes.json();
-    throw new Error(errorData.message || 'Database update failed');
+    const err = await putRes.json();
+    throw new Error(err.message || 'Failed to update records.json');
   }
 }
 
-// Step 5C: Handle Form Submission
+// 3. Form submit handler
 document.getElementById('uploadForm').addEventListener('submit', async (e) => {
   e.preventDefault();
 
@@ -119,25 +125,25 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
 
   if (!file) return;
 
-  // GitHub Contents API max file limit
+  // Enforce GitHub Contents API 25 MB payload limit
   if (file.size > 25 * 1024 * 1024) {
     alertBox.className = 'alert alert-danger';
-    alertBox.textContent = 'Error: GitHub API limits single file uploads to 25 MB.';
+    alertBox.textContent = 'Error: GitHub API limits direct file uploads to 25 MB.';
     alertBox.classList.remove('d-none');
     return;
   }
 
   submitBtn.disabled = true;
-  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving file to GitHub...';
+  submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Saving file to repository...';
   alertBox.classList.add('d-none');
 
   try {
-    // 1. Upload File
+    // Step A: Save file inside uploads/ folder
     const savedPath = await uploadFileToGitHub(file, token);
 
-    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Updating database...';
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Updating records.json...';
 
-    // 2. Commit Metadata to records.json
+    // Step B: Build record metadata
     const recordPayload = {
       id: `rec_${Date.now()}`,
       title: title,
@@ -149,13 +155,14 @@ document.getElementById('uploadForm').addEventListener('submit', async (e) => {
       upload_date: new Date().toISOString().split('T')[0]
     };
 
+    // Step C: Commit metadata to records.json
     await updateRecordsDatabase(recordPayload, token);
 
     alertBox.className = 'alert alert-success';
     alertBox.textContent = 'File uploaded and database updated successfully!';
     alertBox.classList.remove('d-none');
 
-    // Reset input fields (keep token so admin doesn't need to re-type it)
+    // Reset inputs except token
     document.getElementById('itemTitle').value = '';
     document.getElementById('itemDescription').value = '';
     fileInput.value = '';
